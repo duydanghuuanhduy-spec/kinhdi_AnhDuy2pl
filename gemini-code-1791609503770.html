@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Haunted Manors - Online Co-op Horror</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body { background-color: #050505; color: #fff; font-family: 'Courier New', Courier, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; overflow: hidden; }
+        #game-container { position: relative; width: 900px; height: 550px; border: 3px solid #333; box-shadow: 0 0 30px rgba(255, 0, 0, 0.3); background: #000; }
+        canvas { width: 100%; height: 100%; display: block; }
+        #ui-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 15px; }
+        .hud-panel { background: rgba(0, 0, 0, 0.6); border: 1px solid #444; padding: 8px 15px; border-radius: 4px; font-size: 14px; color: #eee; text-shadow: 1px 1px 2px #000; }
+        #lobby-menu { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(10, 10, 12, 0.95); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10; pointer-events: auto; }
+        h1 { color: #8b0000; font-size: 38px; text-transform: uppercase; letter-spacing: 4px; margin-bottom: 10px; text-shadow: 0 0 10px #ff0000; }
+        p.subtitle { color: #888; margin-bottom: 30px; font-size: 14px; }
+        .btn { background: #1a1a1a; color: #d1d1d1; border: 1px solid #555; padding: 12px 24px; margin: 8px; font-family: inherit; font-size: 16px; cursor: pointer; transition: all 0.2s; min-width: 200px; }
+        .btn:hover { background: #8b0000; color: #fff; border-color: #ff0000; box-shadow: 0 0 10px #ff0000; }
+        input[type="text"] { background: #111; border: 1px solid #444; color: #fff; padding: 12px; font-family: inherit; font-size: 16px; text-align: center; margin-bottom: 10px; width: 200px; text-transform: uppercase; }
+        #room-code-display { font-size: 24px; color: #00ffcc; letter-spacing: 3px; font-weight: bold; margin: 15px 0; }
+    </style>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas" width="900" height="550"></canvas>
+    
+    <div id="ui-overlay">
+        <div style="display: flex; justify-content: space-between;">
+            <div class="hud-panel">VẬT PHẨM XE: <span id="items-count" style="color: #ffd700;">0/4</span></div>
+            <div class="hud-panel">TẦNG: <span id="floor-display" style="color: #00ffff;">1</span></div>
+        </div>
+        <div class="hud-panel" style="align-self: center; background: rgba(0,0,0,0.8);" id="msg-box">
+            Dùng [W A S D] di chuyển | [F] Bật Đèn Pin | [Shift] Chạy | [E] Nhặt đồ / Cửa xe
+        </div>
+    </div>
+
+    <div id="lobby-menu">
+        <h1>NHÀ MA 2 TẦNG</h1>
+        <p class="subtitle">CHƠI MẠNG CO-OP 2 NGƯỜI THÁM HIỂM & TRỐN THOÁT</p>
+        
+        <div id="menu-initial">
+            <button class="btn" onclick="hostGame()">TẠO PHÒNG (HOST)</button><br>
+            <button class="btn" onclick="showJoinInput()">THAM GIA (JOIN)</button>
+        </div>
+
+        <div id="menu-join" style="display: none;">
+            <input type="text" id="join-code-input" placeholder="NHẬP MÃ PHÒNG" maxlength="5">
+            <br>
+            <button class="btn" onclick="joinGame()">KẾT NỐI</button>
+            <button class="btn" style="border-color: #444;" onclick="resetMenu()">QUAY LẠI</button>
+        </div>
+
+        <div id="menu-waiting" style="display: none; text-align: center;">
+            <p>MÃ PHÒNG CỦA BẠN:</p>
+            <div id="room-code-display">----</div>
+            <p style="color: #aaa; font-size: 13px;">Hãy gửi mã này cho bạn bè để vào chơi cùng!</p>
+        </div>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    let peer = null;
+    let conn = null;
+    let isHost = false;
+    let myRole = 'p1';
+    
+    let gameState = {
+        players: {
+            p1: { x: 100, y: 350, floor: 1, light: true, angle: 0 },
+            p2: { x: 140, y: 350, floor: 1, light: true, angle: 0 }
+        },
+        items: [
+            { id: 1, name: 'Chìa khóa 1', x: 200, y: 200, floor: 1, taken: false },
+            { id: 2, name: 'Chìa khóa 2', x: 750, y: 150, floor: 2, taken: false },
+            { id: 3, name: 'Ắc-quy xe', x: 800, y: 400, floor: 1, taken: false },
+            { id: 4, name: 'Bugi xe', x: 150, y: 450, floor: 2, taken: false }
+        ],
+        carLocks: 4,
+        carEscaped: false
+    };
+
+    let keys = {};
+    window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+    window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+    function initPeer() {
+        const code = Math.random().toString(36).substring(2, 7).toUpperCase();
+        peer = new Peer('HM-' + code);
+        return code;
+    }
+
+    function hostGame() {
+        isHost = true;
+        myRole = 'p1';
+        const code = initPeer();
+        document.getElementById('menu-initial').style.display = 'none';
+        document.getElementById('menu-waiting').style.display = 'block';
+        document.getElementById('room-code-display').innerText = code;
+
+        peer.on('connection', c => {
+            conn = c;
+            setupConnection();
+            document.getElementById('lobby-menu').style.display = 'none';
+        });
+    }
+
+    function showJoinInput() {
+        document.getElementById('menu-initial').style.display = 'none';
+        document.getElementById('menu-join').style.display = 'block';
+    }
+
+    function resetMenu() {
+        document.getElementById('menu-join').style.display = 'none';
+        document.getElementById('menu-initial').style.display = 'block';
+    }
+
+    function joinGame() {
+        const code = document.getElementById('join-code-input').value.trim().toUpperCase();
+        if (!code) return;
+        myRole = 'p2';
+        peer = new Peer();
+        
+        peer.on('open', () => {
+            conn = peer.connect('HM-' + code);
+            setupConnection();
+        });
+    }
+
+    function setupConnection() {
+        conn.on('open', () => {
+            document.getElementById('lobby-menu').style.display = 'none';
+            requestAnimationFrame(gameLoop);
+        });
+
+        conn.on('data', data => {
+            if (data.type === 'sync') {
+                gameState = data.state;
+            }
+        });
+    }
+
+    function update() {
+        const me = gameState.players[myRole];
+        if (!me) return;
+
+        let speed = keys['shift'] ? 4 : 2.5;
+
+        if (keys['w']) me.y -= speed;
+        if (keys['s']) me.y += speed;
+        if (keys['a']) me.x -= speed;
+        if (keys['d']) me.x += speed;
+
+        // Giới hạn màn hình
+        me.x = Math.max(30, Math.min(870, me.x));
+        me.y = Math.max(30, Math.min(520, me.y));
+
+        // Bật/Tắt đèn pin
+        if (keys['f'] && !keys['f_lock']) {
+            me.light = !me.light;
+            keys['f_lock'] = true;
+        }
+        if (!keys['f']) keys['f_lock'] = false;
+
+        // Đổi tầng qua Cầu thang (ở tọa độ X khoảng 420-480)
+        if (me.x > 420 && me.x < 480 && me.y > 230 && me.y < 300) {
+            if (keys['e'] && !keys['e_lock']) {
+                me.floor = me.floor === 1 ? 2 : 1;
+                document.getElementById('floor-display').innerText = me.floor;
+                keys['e_lock'] = true;
+            }
+        }
+        if (!keys['e']) keys['e_lock'] = false;
+
+        // Nhặt đồ bằng E
+        gameState.items.forEach(item => {
+            if (!item.taken && item.floor === me.floor) {
+                let dist = Math.hypot(me.x - item.x, me.y - item.y);
+                if (dist < 30 && keys['e']) {
+                    item.taken = true;
+                }
+            }
+        });
+
+        // Cập nhật số vật phẩm đã nhặt
+        let collected = gameState.items.filter(i => i.taken).length;
+        document.getElementById('items-count').innerText = collected + "/4";
+
+        // Gửi dữ liệu đồng bộ
+        if (conn && conn.open) {
+            conn.send({ type: 'sync', state: gameState });
+        }
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const me = gameState.players[myRole];
+        if (!me) return;
+
+        // Nền phòng
+        ctx.fillStyle = me.floor === 1 ? '#111015' : '#0a0d1a';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Vẽ Cầu thang giữa nhà
+        ctx.fillStyle = '#333';
+        ctx.fillRect(430, 240, 40, 60);
+        ctx.fillStyle = '#fff';
+        ctx.font = '11px monospace';
+        ctx.fillText("CẦU THANG [E]", 410, 230);
+
+        // Vẽ Xe ô tô thoát hiểm ở góc Tầng 1
+        if (me.floor === 1) {
+            ctx.fillStyle = '#441111';
+            ctx.fillRect(50, 50, 100, 60);
+            ctx.fillStyle = '#aaa';
+            ctx.fillText("XE Ô TÔ [E]", 60, 85);
+        }
+
+        // Vẽ Vật phẩm
+        gameState.items.forEach(item => {
+            if (!item.taken && item.floor === me.floor) {
+                ctx.fillStyle = '#ffd700';
+                ctx.beginPath();
+                ctx.arc(item.x, item.y, 8, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        });
+
+        // Vẽ Người chơi (P1 & P2)
+        ['p1', 'p2'].forEach(role => {
+            const p = gameState.players[role];
+            if (p.floor === me.floor) {
+                ctx.fillStyle = role === 'p1' ? '#00ffff' : '#ff00ff';
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Đèn pin
+                if (p.light) {
+                    ctx.fillStyle = 'rgba(255, 255, 200, 0.15)';
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 120, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        });
+    }
+
+    function gameLoop() {
+        update();
+        draw();
+        requestAnimationFrame(gameLoop);
+    }
+</script>
+</body>
+</html>
